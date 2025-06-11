@@ -1,0 +1,8 @@
+# 跳过常见文件
+src/__pycache__/
+src/*.pyc
+src/*.pyo
+src/*.pyd
+src/.pytest_cache/
+.mypy_cache/
+.vscode/
