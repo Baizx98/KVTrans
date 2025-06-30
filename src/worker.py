@@ -16,7 +16,7 @@ class Worker:
             device_config,
         )
 
-    def execute_model(self, input_data):
-        print(f"Executing model with input: {input_data}")
-        sleep(1)  # Simulate model execution time
+    def execute_model(self, input_data=None):
+        print("Executing model with input")
+        sleep(0.2)  # Simulate model execution time
         print("Model execution completed.")

@@ -5,23 +5,30 @@ from engine import Engine
 from worker import Worker
 import time
 
+from sequence import generate_random_batch
+
 SeqId = int
 BlockId = int
 
 
 if __name__ == "__main__":
-    # cache_config = CacheConfig(
-    #     block_size=32,
-    #     num_gpu_blocks=64,
-    #     num_cpu_blocks=64,
-    #     watermark=0.5,
-    #     transfer_unit=4,
-    # )
-    # model_config = ModelConfig(model_name="test_model", num_attn_layers=4)
-    # device_config = DeviceConfig(device="cuda", device_id=0)
-    # engine = Engine(
-    #     cache_config=cache_config,
-    #     model_config=model_config,
-    #     device_config=device_config,
-    # )
-    pass
+    # 初始化配置
+    cache_config = CacheConfig(
+        block_size=2,
+        num_gpu_blocks=10000,
+        num_cpu_blocks=50000,
+        watermark=0.8,
+        transfer_unit=4,
+    )
+    model_config = ModelConfig(
+        model_name="example_model", num_attn_layers=12, num_kv_heads=2, head_size=4
+    )
+    device_config = DeviceConfig(device="cuda", device_id=0)
+    # 初始化引擎
+    engine = Engine(cache_config, model_config, device_config)
+    # 随机生成一个请求批次
+    batch = generate_random_batch(batch_size=4, seq_length=8)
+
+    # 模仿generate的逻辑
+    # 推理
+    output = engine.generate(batch)

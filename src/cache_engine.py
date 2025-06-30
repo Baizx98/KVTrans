@@ -3,8 +3,9 @@
 import threading
 import torch
 from config import CacheConfig, ModelConfig, DeviceConfig
+from block_manager import Block
 from utils import is_pin_memory_available
-from typing import List, Tuple
+from typing import List, Tuple, Dict, Callable
 
 
 class CacheEngine:
@@ -37,6 +38,10 @@ class CacheEngine:
             f"GPU cache shape={self.gpu_cache.shape}, CPU cache shape={self.cpu_cache.shape}"
         )
 
+        self.data_stream = torch.cuda.Stream()
+        self.completion_callbacks: Dict[torch.cuda.Event, Callable] = {}
+        self.callbacks_lock = threading.Lock()
+
     def _allocate_kv_cache(self, num_blocks, device) -> torch.Tensor:
         """Allocate KV cache on the specified device."""
         kv_cache_shape = self.cache_config.get_kv_cache_shape(
@@ -50,22 +55,21 @@ class CacheEngine:
         )
         return kv_cache
 
-    def copy_blocks_async(self, plan: List[Tuple[str, int, str, int]]):
-        threads = []
+    def copy_blocks_async(
+        self,
+        blocks_to_offload: torch.Tensor,
+        original_blocks: List[Block],
+        callback_fn=None,
+    ):
+        src_block_ids = blocks_to_offload[:, 0]
+        dst_block_ids = blocks_to_offload[:, 1]
+        print(f"[AsyncCopy] Copy {len(src_block_ids)} blocks GPU→CPU.")
 
-        def copy_block(src_dev, src_pid, dst_dev, dst_pid):
-            src_tensor = self.gpu_cache if src_dev == "gpu" else self.cpu_cache
-            dst_tensor = self.gpu_cache if dst_dev == "gpu" else self.cpu_cache
-            dst_tensor[:, dst_pid] = (
-                src_tensor[:, src_pid].detach().to(dst_tensor.device)
-            )
-
-        for src_dev, src_pid, dst_dev, dst_pid in plan:
-            t = threading.Thread(
-                target=copy_block, args=(src_dev, src_pid, dst_dev, dst_pid)
-            )
-            t.start()
-            threads.append(t)
-
-        for t in threads:
-            t.join()
+        with torch.cuda.stream(stream=self.data_stream):  # type: ignore
+            tmp_tensor = self.gpu_cache[:, src_block_ids, :].contiguous()
+            self.cpu_cache[:, dst_block_ids, :].copy_(tmp_tensor, non_blocking=True)
+            event: torch.cuda.Event = torch.cuda.Event(blocking=False)  # type: ignore
+            event.record(self.data_stream)
+            if callback_fn:
+                with self.callbacks_lock:
+                    self.completion_callbacks[event] = callback_fn

@@ -105,10 +105,16 @@ class BlockManager:
         self._gpu_free_block_indices.append(gid)
         del block
 
+    def free_gpu_block_id(self, block_id: BlockId):
+        self._gpu_free_block_indices.append(block_id)
+
     def free_cpu_block(self, block: Block):
         gid = block.block_id
         self._cpu_free_block_indices.append(gid)
         del block
+
+    def free_cpu_block_id(self, block_id: BlockId):
+        self._cpu_free_block_indices.append(block_id)
 
     def get_device_and_pid(self, gid: BlockId) -> Tuple[torch.device, int]:
         if gid >= 0 and gid < self.num_gpu_blocks:
@@ -129,6 +135,9 @@ class BlockManager:
         all_blocks: List[Block] = []
         for table in self.layer_block_tables[layer].values():
             all_blocks.extend(table.blocks)
+        all_blocks = [
+            block for block in all_blocks if self.is_gpu_block(block.block_id)
+        ]
         return sorted(all_blocks, key=lambda block: block.block_id, reverse=True)
 
     def predict_next_layer_needed_blocks(self, layer: int) -> List[Block]:
@@ -144,40 +153,82 @@ class BlockManager:
         self,
         blocks: List[Block],
     ) -> List[Tuple[int, int]]:
-        # List[Tuple[int, int]]: List of tuples (src_block_id, tgt_block_id)
-        # TODO 数据结构设计
-        # 对所有块进行排序，对每个传输单位（若干块）就生成一个卸载计划 ×
-        # 每个卸载计划里分配了目标设备的块号
-        # 每个卸载计划一旦产生，必须传输完毕
-        # 返回一个mapping即可？ 看看vllm中的worker input是如何设计的？
-        # blocks_to_swap_in=scheduler_outputs.blocks_to_swap_in, List[Tuple[int,int]]
-        # blocks_to_swap_out=scheduler_outputs.blocks_to_swap_out,
-        # blocks_to_copy=scheduler_outputs.blocks_to_copy,
-        # blocks_to_swap_in = torch.tensor(execute_model_req.blocks_to_swap_in,
-        #                                 device="cpu",
-        #                                 dtype=torch.int64).view(-1, 2)
-        # blocks_to_swap_out = torch.tensor(execute_model_req.blocks_to_swap_out,
-        #                                  device="cpu",
-        #                                  dtype=torch.int64).view(-1, 2)
-        ## `blocks_to_copy` is a gpu tensor. The src and tgt of
-        ## blocks to copy are in the same device, and `blocks_to_copy`
-        ## can be used directly within cuda kernels.
-        # blocks_to_copy = torch.tensor(execute_model_req.blocks_to_copy,
-        #                              device=self.device,
-        #                              dtype=torch.int64).view(-1, 2)
-        # 必须先分配，再传输，最后释放
-        # 应该返回tensor和list[Tuple[int, int]]
-        # 那么在offload plan中，应该先申请CPU块号，返回映射tensor
+        # 问题是，块实例跟seq是绑定在一起的，我在释放块id的时候，是单独释放的id
+        # 然而，再卸载完成后，我要更新seq中的block的id，而不是释放block这个对象
+        physical_block_id_mapping: List[Tuple[int, int]] = []
+        block_num = len(blocks)
+        if self.can_allocate_cpu_blocks(block_num):
+            for i in range(block_num):
+                gpu_block_id = blocks[i].block_id
+                cpu_block_id = self.allocate_cpu_block_id()
+                physical_gpu_id = self.get_device_and_pid(gpu_block_id)[1]
+                physical_cpu_id = self.get_device_and_pid(cpu_block_id)[1]
+                physical_block_id_mapping.append((physical_gpu_id, physical_cpu_id))
+        else:
+            raise RuntimeError("Not enough CPU blocks available for offloading")
 
-        return [(1, 2)]
+        return physical_block_id_mapping
 
-    def offload(self):
-        sorted_important_block = self.get_layer_blocks_by_importance(0)
-        # 生成卸载计划
+    def update_block_device(
+        self, plan: List[tuple[int, int]], original_blocks: List[Block]
+    ) -> None:
+        """
+        更新原始块的设备信息
+        :param plan: [(gpu_block_id, cpu_block_id), ...]
+        :param original_blocks: List[Block]
+        """
+        for i, (gpu_id, cpu_id) in enumerate(plan):
+            original_blocks[i].block_id = cpu_id
+            seq_id = self.gid_to_seq[gpu_id]
+            self.gid_to_seq[cpu_id] = seq_id
+            del self.gid_to_seq[gpu_id]
+            self.free_gpu_block_id(gpu_id)
 
-    def get_prefetch_plan(self, layer: int):
-        # TODO 预取计划
-        return None
+    def cpu_free_block_num(self) -> int:
+        return len(self._cpu_free_block_indices)
 
-    # 重点是我需要一个独立的模块来完成块元数据管理和物理数据管理的整合或者通信
-    # 每传输一个单位，就要执行 目标设备块号预分配 块传输 源设备块号释放 这一原子步骤
+    def gpu_free_block_num(self) -> int:
+        return len(self._gpu_free_block_indices)
+
+    def is_cpu_block(self, block_id: BlockId) -> bool:
+        return block_id in self._cpu_all_block_indices
+
+    def is_gpu_block(self, block_id: BlockId) -> bool:
+        return block_id in self._gpu_all_block_indices
+
+    def allocate_gpu_blocks_for_all_layers(
+        self, seq_id: SeqId, num_blocks: int
+    ) -> None:
+        for layer in range(self.num_attn_layers):
+            if seq_id not in self.layer_block_tables[layer]:
+                self.layer_block_tables[layer][seq_id] = BlockTable(self.block_size)
+            table = self.layer_block_tables[layer][seq_id]
+            for _ in range(num_blocks):
+                block = self.allocate_gpu_block()
+                table.blocks.append(block)
+                self.gid_to_seq[block.block_id] = seq_id
+
+    def free_all_blocks_for_seq(self, seq_id: SeqId) -> None:
+        """
+        Free all blocks associated with a sequence ID across all layers.
+        :param seq_id: Sequence ID to free blocks for.
+        """
+        for layer in range(self.num_attn_layers):
+            if seq_id in self.layer_block_tables[layer]:
+                table = self.layer_block_tables[layer][seq_id]
+                for block in table.blocks:
+                    del self.gid_to_seq[block.block_id]
+                    if self.is_gpu_block(block.block_id):
+                        self.free_gpu_block(block)
+                    elif self.is_cpu_block(block.block_id):
+                        self.free_cpu_block(block)
+                del self.layer_block_tables[layer][seq_id]
+
+    def allocate_gpu_blocks_for_layer(
+        self, seq_id: SeqId, num_blocks: int, layer: int
+    ) -> None:
+        table = self.layer_block_tables[layer][seq_id]
+        for _ in range(num_blocks):
+            block = self.allocate_gpu_block()
+            table.blocks.append(block)
+            self.gid_to_seq[block.block_id] = seq_id
