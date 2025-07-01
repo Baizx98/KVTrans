@@ -55,6 +55,9 @@ class BlockManager:
         ]
         self.gid_to_seq: Dict[BlockId, SeqId] = {}
 
+        # 对block manager的操作们是否需要加锁呢？
+        # 我要打问号了
+
     @property
     def buffer_blocks(self) -> int:
         return self._buffer_blocks
@@ -126,6 +129,13 @@ class BlockManager:
             return torch.device("cpu"), gid - self.num_gpu_blocks
         raise ValueError(f"Invalid gid: {gid}")
 
+    def get_gid(self, device: torch.device, pid: int) -> BlockId:
+        if device.type == "cuda":
+            return pid
+        elif device.type == "cpu":
+            return self.num_gpu_blocks + pid
+        raise ValueError(f"Invalid device: {device}")
+
     def get_layer_blocks_by_importance(self, layer: int) -> List[Block]:
         # Dummy: importance = block_id
         # 应该从GPU块中挑选
@@ -169,7 +179,7 @@ class BlockManager:
 
         return physical_block_id_mapping
 
-    def update_block_device(
+    def update_block_device_offload(
         self, plan: List[tuple[int, int]], original_blocks: List[Block]
     ) -> None:
         """
@@ -177,12 +187,15 @@ class BlockManager:
         :param plan: [(gpu_block_id, cpu_block_id), ...]
         :param original_blocks: List[Block]
         """
-        for i, (gpu_id, cpu_id) in enumerate(plan):
-            original_blocks[i].block_id = cpu_id
-            seq_id = self.gid_to_seq[gpu_id]
-            self.gid_to_seq[cpu_id] = seq_id
-            del self.gid_to_seq[gpu_id]
-            self.free_gpu_block_id(gpu_id)
+        for i, (gpu_pid, cpu_pid) in enumerate(plan):
+            # NOTE plan里面是物理id，gid 里面是全局id
+            gpu_gid = self.get_gid(torch.device("cuda"), gpu_pid)
+            cpu_gid = self.get_gid(torch.device("cpu"), cpu_pid)
+            original_blocks[i].block_id = cpu_gid
+            seq_id = self.gid_to_seq[gpu_gid]
+            self.gid_to_seq[cpu_gid] = seq_id
+            del self.gid_to_seq[gpu_gid]
+            self.free_gpu_block_id(gpu_gid)
 
     def cpu_free_block_num(self) -> int:
         return len(self._cpu_free_block_indices)

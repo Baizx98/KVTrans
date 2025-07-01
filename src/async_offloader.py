@@ -40,6 +40,7 @@ class AsyncOffloader:
             if self.offload_thread and self.offload_thread.is_alive():
                 self.abort_event.set()
                 self.offload_thread.join()
+                print("🟥 Previous offload task aborted.")
 
             self.abort_event.clear()
             self.offload_thread = threading.Thread(
@@ -78,7 +79,7 @@ class AsyncOffloader:
 
         # 闭包，简化函数参数传递
         def on_transfer_complete():
-            self.block_manager.update_block_device(plan, blocks)
+            self.block_manager.update_block_device_offload(plan, blocks)
 
         self.cache_engine.copy_blocks_async(
             blocks_to_offload,

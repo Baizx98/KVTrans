@@ -6,3 +6,4 @@ src/*.pyd
 src/.pytest_cache/
 .mypy_cache/
 .vscode/
+*.txt
