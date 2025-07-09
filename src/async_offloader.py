@@ -62,6 +62,7 @@ class AsyncOffloader:
             # 获取当前步长的块
             # self.transfer_unit = self.update_transfer_unit(num_blocks, current_step)
             print(f"tranfer unit is {self.transfer_unit}")
+            # FIXME 此处切片索引是否会越界呢
             blocks = sorted_blocks[current_step : current_step + self.transfer_unit]
             if not blocks:
                 break
@@ -81,7 +82,7 @@ class AsyncOffloader:
         def on_transfer_complete():
             self.block_manager.update_block_device_offload(plan, blocks)
 
-        self.cache_engine.copy_blocks_async(
+        self.cache_engine.offload_copy_blocks_async(
             blocks_to_offload,
             blocks,
             callback_fn=on_transfer_complete,
@@ -91,28 +92,29 @@ class AsyncOffloader:
         """
         这个线程专门负责检查 CUDA 事件是否完成，并在完成后执行回调。
         """
-        print("💡 Event monitor thread started.")
+        print("💡 Offload Event monitor thread started.")
         while True:
             # 检查是否有任务需要中止
-            if self.abort_event.is_set() and not self.offload_thread.is_alive():
+            if self.abort_event.is_set() and self.offload_thread and not self.offload_thread.is_alive():
+                # FIXME offload_thread 在切换时也会终止，这里有可能会意外触发改逻辑
                 # 如果主 offload 线程已经中止且不活跃，可以考虑停止监控线程
                 # 或者让它继续等待新的 offload 任务
                 # 为简单起见，这里让它一直运行
                 pass
 
             events_to_process = []
-            with self.cache_engine.callbacks_lock:
+            with self.cache_engine.offload_callbacks_lock:
                 # 遍历所有待处理的事件
                 for event, callback_fn in list(
-                    self.cache_engine.completion_callbacks.items()
+                    self.cache_engine.offload_completion_callbacks.items()
                 ):
-                    if event.query():  # 检查事件是否完成
+                    if event.query():  # 检查事件是否完成   
                         events_to_process.append((event, callback_fn))
 
             for event, callback_fn in events_to_process:
                 # 移除已完成的事件 这里是什么意思呢？NOTE
-                with self.cache_engine.callbacks_lock:
-                    del self.cache_engine.completion_callbacks[event]
+                with self.cache_engine.offload_callbacks_lock:
+                    del self.cache_engine.offload_completion_callbacks[event]
                 # 执行回调函数
                 callback_fn()
 

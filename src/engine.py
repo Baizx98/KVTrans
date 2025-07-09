@@ -4,6 +4,7 @@ from block_manager import BlockManager
 from scheduler import cleanup_batch, schedule_batch
 from worker import Worker
 from async_offloader import AsyncOffloader
+from async_prefetcher import AsyncPrefetcher
 from config import CacheConfig, ModelConfig, DeviceConfig
 from sequence import Sequence
 from typing import List
@@ -34,6 +35,11 @@ class Engine:
         self.worker = Worker(cache_config, model_config, device_config)
         self.block_transfer_unit = cache_config.transfer_unit
         self.async_offloader = AsyncOffloader(
+            self.block_manager,
+            self.worker.cache_engine,
+            self.block_transfer_unit,
+        )
+        self.async_prefetcher = AsyncPrefetcher(
             self.block_manager,
             self.worker.cache_engine,
             self.block_transfer_unit,
@@ -80,6 +86,10 @@ class Engine:
         # 要保证该层的计算开始前，所需要的块已经到位
         # 需要有一个队列将CPU中的块按照使用它们的顺序排好队，
         # 从batch的当前层开始看，把
+        # 判断当前层是否预取完毕,以及当前层是否正在预取，如果完毕，则开始预取将来最近一层需要的块，如果正在预取，则等待预取完成
+        # 如果该层的kv cache not ready，说明预取线程一定在预取该层的kv cache
+        if not self.block_manager.kv_cache_ready(batch, layer) and self.async_prefetcher.prefetch_thread and not self.async_prefetcher.prefetch_thread.is_alive():
+            self.async_prefetcher.start_prefetch(layer)
         print(f"🔵 Starting layer {layer} step with {len(batch)} sequences.")
         self.worker.execute_model(input_data=batch)  # Replace with actual input data
 

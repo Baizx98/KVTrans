@@ -38,9 +38,13 @@ class CacheEngine:
             f"GPU cache shape={self.gpu_cache.shape}, CPU cache shape={self.cpu_cache.shape}"
         )
 
-        self.data_stream = torch.cuda.Stream()
-        self.completion_callbacks: Dict[torch.cuda.Event, Callable] = {}
-        self.callbacks_lock = threading.Lock()
+        self.offload_data_stream = torch.cuda.Stream()
+        self.offload_completion_callbacks: Dict[torch.cuda.Event, Callable] = {}
+        self.offload_callbacks_lock = threading.Lock()
+
+        self.prefetch_data_stream = torch.cuda.Stream()
+        self.prefetch_completion_callbacks: Dict[torch.cuda.Event, Callable] = {}
+        self.prefetch_callbacks_lock = threading.Lock()
 
     def _allocate_kv_cache(self, num_blocks, device) -> torch.Tensor:
         """Allocate KV cache on the specified device."""
@@ -55,7 +59,7 @@ class CacheEngine:
         )
         return kv_cache
 
-    def copy_blocks_async(
+    def offload_copy_blocks_async(
         self,
         blocks_to_offload: torch.Tensor,
         original_blocks: List[Block],
@@ -65,11 +69,31 @@ class CacheEngine:
         dst_block_ids = blocks_to_offload[:, 1]
         print(f"[AsyncCopy] Copy {len(src_block_ids)} blocks GPU→CPU.")
 
-        with torch.cuda.stream(stream=self.data_stream):  # type: ignore
+        with torch.cuda.stream(stream=self.offload_data_stream):  # type: ignore
             tmp_tensor = self.gpu_cache[:, src_block_ids, :].contiguous()
             self.cpu_cache[:, dst_block_ids, :].copy_(tmp_tensor, non_blocking=True)
             event: torch.cuda.Event = torch.cuda.Event(blocking=False)  # type: ignore
-            event.record(self.data_stream)
+            event.record(self.offload_data_stream)
             if callback_fn:
-                with self.callbacks_lock:
-                    self.completion_callbacks[event] = callback_fn
+                with self.offload_callbacks_lock:
+                    self.offload_completion_callbacks[event] = callback_fn
+
+    def prefetch_copy_blocks_async(
+        self,  
+        blocks_to_prefetch: torch.Tensor,
+        original_blocks: List[Block],
+        callback_fn=None,
+    ):
+        # FIXME 源块和目标块的顺序需要重新考虑
+        src_block_ids = blocks_to_prefetch[:, 0]
+        dst_block_ids = blocks_to_prefetch[:, 1]
+        print(f"[AsyncCopy] Copy {len(src_block_ids)} blocks CPU→GPU.")
+
+        with torch.cuda.stream(stream=self.prefetch_data_stream):  # type: ignore
+            tmp_tensor = self.cpu_cache[:, src_block_ids, :].contiguous()
+            self.gpu_cache[:, dst_block_ids, :].copy_(tmp_tensor, non_blocking=True)
+            event: torch.cuda.Event = torch.cuda.Event(blocking=False)  # type: ignore
+            event.record(self.prefetch_data_stream)
+            if callback_fn:
+                with self.prefetch_callbacks_lock:
+                    self.prefetch_completion_callbacks[event] = callback_fn

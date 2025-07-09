@@ -4,7 +4,7 @@ from collections import deque
 
 from typing import List, Dict, Optional, Deque, FrozenSet, Tuple
 from config import CacheConfig, ModelConfig, DeviceConfig
-
+from sequence import Sequence
 import torch
 
 
@@ -136,6 +136,14 @@ class BlockManager:
             return self.num_gpu_blocks + pid
         raise ValueError(f"Invalid device: {device}")
 
+    def is_kv_cache_ready(self, batch: List[Sequence], layer: int) -> bool:
+        """检查该batch的该层的所需最少kv块是否都在GPU上"""
+        for seq in batch:
+            if seq.seq_id not in self.layer_block_tables[layer]:
+                return False
+        # 先这样写，后面再改，加具体的逻辑
+        return True
+
     def get_layer_blocks_by_importance(self, layer: int) -> List[Block]:
         # Dummy: importance = block_id
         # 应该从GPU块中挑选
@@ -157,6 +165,9 @@ class BlockManager:
         all_blocks: List[Block] = []
         for table in self.layer_block_tables[layer].values():
             all_blocks.extend(table.blocks)
+        all_blocks = [
+            block for block in all_blocks if self.is_cpu_block(block.block_id)
+        ]
         return sorted(all_blocks, key=lambda block: block.block_id, reverse=True)
 
     def get_offload_plan(
@@ -178,6 +189,21 @@ class BlockManager:
             raise RuntimeError("Not enough CPU blocks available for offloading")
 
         return physical_block_id_mapping
+    
+    def get_prefetch_plan(self, blocks: List[Block]) -> List[Tuple[int, int]]:
+        physical_block_id_mapping: List[Tuple[int, int]] = []
+        block_num = len(blocks)
+        if self.can_allocate_gpu_blocks(block_num):
+            for i in range(block_num):
+                cpu_block_id = blocks[i].block_id
+                gpu_block_id = self.allocate_gpu_block_id()
+                physical_cpu_id = self.get_device_and_pid(cpu_block_id)[1]
+                physical_gpu_id = self.get_device_and_pid(gpu_block_id)[1]
+                physical_block_id_mapping.append((physical_cpu_id, physical_gpu_id))
+        else:
+            raise RuntimeError("Not enough GPU blocks available for prefetching")
+
+        return physical_block_id_mapping
 
     def update_block_device_offload(
         self, plan: List[tuple[int, int]], original_blocks: List[Block]
@@ -196,6 +222,22 @@ class BlockManager:
             self.gid_to_seq[cpu_gid] = seq_id
             del self.gid_to_seq[gpu_gid]
             self.free_gpu_block_id(gpu_gid)
+    
+    def update_block_device_prefetch(self, plan: List[tuple[int, int]], original_blocks: List[Block]) -> None:
+        for i, (cpu_pid, gpu_pid) in enumerate(plan):
+            cpu_gid = self.get_gid(torch.device("cpu"), cpu_pid)
+            gpu_gid = self.get_gid(torch.device("cuda"), gpu_pid)
+            original_blocks[i].block_id = gpu_gid
+            seq_id = self.gid_to_seq[cpu_gid]
+            self.gid_to_seq[gpu_gid] = seq_id
+            del self.gid_to_seq[cpu_gid]
+            self.free_cpu_block_id(cpu_gid)
+
+    def kv_cache_ready(self, batch: List[Sequence], layer: int) -> bool:
+        for seq in batch:
+            if seq.seq_id not in self.layer_block_tables[layer]:
+                return False
+        return True
 
     def cpu_free_block_num(self) -> int:
         return len(self._cpu_free_block_indices)
