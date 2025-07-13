@@ -6,6 +6,7 @@ from typing import List, Dict, Optional, Deque, FrozenSet, Tuple
 from config import CacheConfig, ModelConfig, DeviceConfig
 from sequence import Sequence
 import torch
+import time
 
 
 BlockId = int
@@ -238,6 +239,10 @@ class BlockManager:
             if seq.seq_id not in self.layer_block_tables[layer]:
                 return False
         return True
+
+    def wait_for_kv_cache_ready(self, batch: List[Sequence], layer: int) -> None:
+        while not self.kv_cache_ready(batch, layer):
+            time.sleep(0.001)
 
     def cpu_free_block_num(self) -> int:
         return len(self._cpu_free_block_indices)

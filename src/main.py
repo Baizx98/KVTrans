@@ -4,8 +4,12 @@ from typing import List, Dict, Optional
 from engine import Engine
 from worker import Worker
 import time
+import os 
 
 from sequence import generate_random_batch
+
+os.environ['CUDA_VISIBLE_DEVICES'] = '1' 
+
 
 SeqId = int
 BlockId = int

@@ -88,8 +88,7 @@ class Engine:
         # 从batch的当前层开始看，把
         # 判断当前层是否预取完毕,以及当前层是否正在预取，如果完毕，则开始预取将来最近一层需要的块，如果正在预取，则等待预取完成
         # 如果该层的kv cache not ready，说明预取线程一定在预取该层的kv cache
-        if not self.block_manager.kv_cache_ready(batch, layer) and self.async_prefetcher.prefetch_thread and not self.async_prefetcher.prefetch_thread.is_alive():
-            self.async_prefetcher.start_prefetch(layer)
+        self.block_manager.wait_for_kv_cache_ready(batch, layer)
         print(f"🔵 Starting layer {layer} step with {len(batch)} sequences.")
         self.worker.execute_model(input_data=batch)  # Replace with actual input data
 
@@ -99,7 +98,7 @@ class Engine:
 
         # 开始执行当前层的卸载任务,并自动终止上一层
         self.async_offloader.start_offload(layer)
-
+        self.async_prefetcher.notify(layer)
         # 预取应该放在这里，它应该是一个常驻的线程，单纯地通过事件来同步
         # 也就是说，预取线程会一直运行，不断地将加下来所需要的数据从CPU传输到GPU
         # 在每层的计算开始前，阻塞当前层的预取任务，
