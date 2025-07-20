@@ -60,6 +60,7 @@ class Engine:
             # 清理 这里的两个batch不是同一个对象
             batch = cleanup_batch(batch)
         print("All sequences processed and cleaned up.")
+        self.shutdown()
 
     def step(self, batch: List[Sequence]):
         if self.prefill_flag:
@@ -100,7 +101,7 @@ class Engine:
         # 通知上一层的卸载任务并在其完成当前传输的原子步骤后终止任务
 
         # 开始执行当前层的卸载任务,并自动终止上一层
-        self.async_offloader.start_offload(layer)
+        self.async_offloader.request_offload(layer)
         self.async_prefetcher.notify(layer)
         # 预取应该放在这里，它应该是一个常驻的线程，单纯地通过事件来同步
         # 也就是说，预取线程会一直运行，不断地将加下来所需要的数据从CPU传输到GPU
@@ -108,3 +109,8 @@ class Engine:
         # 如何保证 有新的块供分配呢？答案是要预取的比卸载的要少
         # 还需要一个指标来说明当前超额分配了多少块，下一步或未来几步需要多少块，预取回来的块除了缓冲区以外
         # 需要把这些块也空出来，并且作为预取块数的指标
+
+    def shutdown(self):
+        print("🟢 Engine shutdown")
+        self.async_offloader.shutdown()
+        self.async_prefetcher.shutdown()

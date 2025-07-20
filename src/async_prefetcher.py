@@ -32,13 +32,12 @@ class AsyncPrefetcher:
         self._prefetched_layers: Set[int] = set()
 
         self.prefetch_thread: Optional[threading.Thread] = threading.Thread(
-            target=self._run, daemon=True, name="prefetch_thread"
+            target=self._run, name="prefetch_thread"
         )
         self.prefetch_thread.start()
 
         self.event_monitor_thread: Optional[threading.Thread] = threading.Thread(
             target=self._event_monitor_worker,
-            daemon=True,
             name="prefetch_event_monitor_thread",
         )
         self.event_monitor_thread.start()
