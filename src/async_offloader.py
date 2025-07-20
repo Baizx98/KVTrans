@@ -19,7 +19,9 @@ class AsyncOffloader:
         self.abort_event = threading.Event()
         self.lock = threading.Lock()
         self.event_monitor_thread = threading.Thread(
-            target=self._event_monitor_worker, daemon=True
+            target=self._event_monitor_worker,
+            daemon=True,
+            name="offload_event_monitor_thread",
         )
         self.event_monitor_thread.start()
 
@@ -44,7 +46,7 @@ class AsyncOffloader:
 
             self.abort_event.clear()
             self.offload_thread = threading.Thread(
-                target=self._offload_worker, args=(layer,)
+                target=self._offload_worker, args=(layer,), name="offload_thread"
             )
             self.offload_thread.start()
 
@@ -95,7 +97,11 @@ class AsyncOffloader:
         print("💡 Offload Event monitor thread started.")
         while True:
             # 检查是否有任务需要中止
-            if self.abort_event.is_set() and self.offload_thread and not self.offload_thread.is_alive():
+            if (
+                self.abort_event.is_set()
+                and self.offload_thread
+                and not self.offload_thread.is_alive()
+            ):
                 # FIXME offload_thread 在切换时也会终止，这里有可能会意外触发改逻辑
                 # 如果主 offload 线程已经中止且不活跃，可以考虑停止监控线程
                 # 或者让它继续等待新的 offload 任务
@@ -108,7 +114,7 @@ class AsyncOffloader:
                 for event, callback_fn in list(
                     self.cache_engine.offload_completion_callbacks.items()
                 ):
-                    if event.query():  # 检查事件是否完成   
+                    if event.query():  # 检查事件是否完成
                         events_to_process.append((event, callback_fn))
 
             for event, callback_fn in events_to_process:

@@ -6,6 +6,7 @@ from config import CacheConfig, ModelConfig, DeviceConfig
 from block_manager import Block
 from utils import is_pin_memory_available
 from typing import List, Tuple, Dict, Callable
+from queue import Queue
 
 
 class CacheEngine:
@@ -43,8 +44,7 @@ class CacheEngine:
         self.offload_callbacks_lock = threading.Lock()
 
         self.prefetch_data_stream = torch.cuda.Stream()
-        self.prefetch_completion_callbacks: Dict[torch.cuda.Event, Callable] = {}
-        self.prefetch_callbacks_lock = threading.Lock()
+        self.prefetch_monitor_queue: Queue[Tuple[torch.cuda.Event, Callable]] = Queue()
 
     def _allocate_kv_cache(self, num_blocks, device) -> torch.Tensor:
         """Allocate KV cache on the specified device."""
@@ -79,7 +79,7 @@ class CacheEngine:
                     self.offload_completion_callbacks[event] = callback_fn
 
     def prefetch_copy_blocks_async(
-        self,  
+        self,
         blocks_to_prefetch: torch.Tensor,
         original_blocks: List[Block],
         callback_fn=None,
@@ -95,5 +95,4 @@ class CacheEngine:
             event: torch.cuda.Event = torch.cuda.Event(blocking=False)  # type: ignore
             event.record(self.prefetch_data_stream)
             if callback_fn:
-                with self.prefetch_callbacks_lock:
-                    self.prefetch_completion_callbacks[event] = callback_fn
+                self.prefetch_monitor_queue.put((event, callback_fn))

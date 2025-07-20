@@ -76,8 +76,11 @@ class Engine:
             if not self.prefill_flag:
                 for sequence in batch:
                     self.block_manager.allocate_gpu_blocks_for_layer(
-                        sequence.seq_id, layer, 1
+                        sequence.seq_id, 1, layer
                     )
+            print(f"layer {layer}")
+            print(f"token nums of batch: {batch[0].seq_len}")
+            print(f"len of gid_to_seq: {len(self.block_manager.gid_to_seq)}")
             self.layer_step(batch, layer)
             print(f"cpu block num:{self.block_manager.cpu_free_block_num()}")
             print(f"gpu block num:{self.block_manager.gpu_free_block_num()}")

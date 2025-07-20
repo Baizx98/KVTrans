@@ -17,7 +17,7 @@ class Sequence:
         self.seq_len += 1
 
         # 生成终止条件
-        if self.seq_len >= 25:
+        if self.seq_len >= 10:
             flag = random.random()
             if flag < 0.9:  # 50% 的概率终止
                 self.mark_down()
