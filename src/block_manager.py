@@ -210,6 +210,13 @@ class BlockManager:
 
             return physical_block_id_mapping
 
+    def get_transfer_plan(
+        self, blocks: List[Block], src_device: torch.device, dst_device: torch.device
+    ) -> List[Tuple[int, int]]:
+        raise NotImplementedError(
+            "This method should be implemented in subclasses to provide specific transfer plans."
+        )
+
     def update_block_device_offload(
         self, plan: List[tuple[int, int]], original_blocks: List[Block]
     ) -> None:
@@ -316,3 +323,6 @@ class BlockManager:
                 block = self.allocate_gpu_block()
                 table.blocks.append(block)
                 self.gid_to_seq[block.block_id] = seq_id
+
+    def update_blocks_after_transfer(self) -> None:
+        pass

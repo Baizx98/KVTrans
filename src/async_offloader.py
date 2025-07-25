@@ -11,17 +11,24 @@ class AsyncOffloader:
     def __init__(
         self, block_manager: BlockManager, cache_engine: CacheEngine, transfer_unit: int
     ):
+        # 通用的上级模块
         self.block_manager = block_manager
         self.cache_engine = cache_engine
         self.transfer_unit: int = transfer_unit
 
-        self._condition = threading.Condition()
-        self._request_layer : Optional[int] = None
-        self._shutdown = False
-        self._monitor_shutdown = False
+        # 特有的变量
+        self._request_layer: Optional[int] = None
         self._abort_event = threading.Event()
 
-        self.offload_thread: threading.Thread = threading.Thread(target = self._run, name="offload_thread")
+        # 线程管理的变量
+        self._condition = threading.Condition()
+        self._shutdown = False
+        self._monitor_shutdown = False
+
+        # 线程创建和启动
+        self.offload_thread: threading.Thread = threading.Thread(
+            target=self._run, name="offload_thread"
+        )
         self.offload_thread.start()
         self.event_monitor_thread = threading.Thread(
             target=self._event_monitor_worker,
@@ -29,7 +36,7 @@ class AsyncOffloader:
         )
         self.event_monitor_thread.start()
 
-    def request_offload(self, layer: int):
+    def notify(self, layer: int):
         # notify the offload thread to offload the layer
         self._abort_event.set()
         with self._condition:
@@ -61,10 +68,6 @@ class AsyncOffloader:
                 self._abort_event.clear()
             if layer is not None:
                 self._offload_layer(layer)
-            else:
-                # 抛出异常
-                raise RuntimeError("No layer requested for offloading")
-
 
     def _offload_layer(self, layer: int):
         sorted_blocks = self.block_manager.get_layer_blocks_by_importance(layer)
@@ -78,7 +81,7 @@ class AsyncOffloader:
                 print(f"🟡 Layer {layer} offload interrupted at step {current_step}.")
                 return
 
-            blocks = sorted_blocks[current_step: current_step + self.transfer_unit]
+            blocks = sorted_blocks[current_step : current_step + self.transfer_unit]
             if not blocks:
                 break
 
@@ -88,7 +91,6 @@ class AsyncOffloader:
             current_step += self.transfer_unit
 
         print(f"✅ Offload complete for layer {layer}.")
-
 
     def update_transfer_unit(self, num_blocks: int, current_step: int) -> int:
         # 如果每次传输的处理开销太大，则增加传输单位，否则减小传输单位

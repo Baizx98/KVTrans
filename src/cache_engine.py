@@ -96,3 +96,18 @@ class CacheEngine:
             event.record(self.prefetch_data_stream)
             if callback_fn:
                 self.prefetch_monitor_queue.put((event, callback_fn))
+
+    def transfer_blocks_async(
+        self,
+        blocks_to_transfer: torch.Tensor,
+        src_device: torch.device,
+        dst_device: torch.device,
+        callback_fn=None,
+    ):
+        """Transfer blocks asynchronously between devices."""
+        print(
+            f"[AsyncTransfer] Transfer {len(blocks_to_transfer)} blocks from {src_device} to {dst_device}."
+        )
+
+        # This method should be implemented in subclasses
+        raise NotImplementedError("This method should be implemented in subclasses.")

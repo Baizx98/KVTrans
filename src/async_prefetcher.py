@@ -20,22 +20,26 @@ class AsyncPrefetcher:
             cache_engine: 缓存引擎
             transfer_unit: 传输单位
         """
+        # 通用的上级模块
         self.block_manager = block_manager
         self.cache_engine = cache_engine
         self.transfer_unit = transfer_unit
-        self.watermark = self.block_manager.watermark
 
+        # 特有的变量
+        self.watermark = self.block_manager.watermark
         self.prefetch_queue: deque[int] = deque()
+        self._prefetched_layers: Set[int] = set()
+
+        # 线程管理的变量
         self._condition = threading.Condition()
         self._shutdown = False
         self._monitor_shutdown = False
-        self._prefetched_layers: Set[int] = set()
 
+        # 线程创建和启动
         self.prefetch_thread: Optional[threading.Thread] = threading.Thread(
             target=self._run, name="prefetch_thread"
         )
         self.prefetch_thread.start()
-
         self.event_monitor_thread: Optional[threading.Thread] = threading.Thread(
             target=self._event_monitor_worker,
             name="prefetch_event_monitor_thread",
@@ -55,10 +59,10 @@ class AsyncPrefetcher:
         # TODO 这里需要根据watermark来决定预取的层数
         # TODO 这里预取的层数是循环的，预取完最后一层后就应该预取第一层了
         return [
-            l
-            for l in range(current_layer + 1, current_layer + 3)
-            if l < self.block_manager.num_attn_layers
-            and l not in self._prefetched_layers
+            layer
+            for layer in range(current_layer + 1, current_layer + 3)
+            if layer < self.block_manager.num_attn_layers
+            and layer not in self._prefetched_layers
         ]
 
     def notify(self, layer: int):
@@ -102,36 +106,38 @@ class AsyncPrefetcher:
                 layer = self.prefetch_queue.popleft()
                 self._prefetched_layers.remove(layer)
             print(f"🟢 Layer {layer} prefetch started.")
-            sorted_blocks = self.block_manager.predict_next_layer_needed_blocks(layer)
-            num_blocks = len(sorted_blocks)
-            current_step = 0
+            if layer is not None:
+                self.prefetcher_layer(layer)
 
-            if num_blocks == 0:
-                continue
+    def prefetcher_layer(self, layer: int):
+        sorted_blocks = self.block_manager.predict_next_layer_needed_blocks(layer)
+        num_blocks = len(sorted_blocks)
+        current_step = 0
 
-            # ✳️ 如果 GPU 块数量触及水位线，则可以触发 offload（你可以自定义调用）
-            if self.block_manager.gpu_free_block_num() < int(
-                self.block_manager.num_gpu_blocks * self.watermark
-            ):
-                print(f"⚠️ Layer {layer} 预取前触及 GPU 水位线，建议触发卸载策略")
+        if num_blocks == 0:
+            return
 
-            while current_step < num_blocks:
-                blocks = sorted_blocks[current_step : current_step + self.transfer_unit]
-                if not blocks:
-                    break
-                try:
-                    plan = self.block_manager.get_prefetch_plan(blocks)
-                    print(
-                        f"prefetch plan for layer {layer} at step {current_step}: {plan}"
-                    )
-                except RuntimeError as e:
-                    print(f"🟥 Layer {layer} prefetch failed: {e}")
-                    break
+        # ✳️ 如果 GPU 块数量触及水位线，则可以触发 offload（你可以自定义调用）
+        if self.block_manager.gpu_free_block_num() < int(
+            self.block_manager.num_gpu_blocks * self.watermark
+        ):
+            print(f"⚠️ Layer {layer} 预取前触及 GPU 水位线，建议触发卸载策略")
 
-                self._prefetch_unit(plan, blocks)
-                current_step += self.transfer_unit
+        while current_step < num_blocks:
+            blocks = sorted_blocks[current_step : current_step + self.transfer_unit]
+            if not blocks:
+                break
+            try:
+                plan = self.block_manager.get_prefetch_plan(blocks)
+                print(f"prefetch plan for layer {layer} at step {current_step}: {plan}")
+            except RuntimeError as e:
+                print(f"🟥 Layer {layer} prefetch failed: {e}")
+                break
 
-            print(f"✅ Layer {layer} 预取完成")
+            self._prefetch_unit(plan, blocks)
+            current_step += self.transfer_unit
+
+        print(f"✅ Layer {layer} 预取完成")
 
     def _prefetch_unit(self, plan: List[tuple[int, int]], blocks: List[Block]):
         """生成预取计划的tensor,并执行异步拷贝，拷贝完成后更新block的device"""

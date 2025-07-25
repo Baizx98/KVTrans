@@ -101,7 +101,7 @@ class Engine:
         # 通知上一层的卸载任务并在其完成当前传输的原子步骤后终止任务
 
         # 开始执行当前层的卸载任务,并自动终止上一层
-        self.async_offloader.request_offload(layer)
+        self.async_offloader.notify(layer)
         self.async_prefetcher.notify(layer)
         # 预取应该放在这里，它应该是一个常驻的线程，单纯地通过事件来同步
         # 也就是说，预取线程会一直运行，不断地将加下来所需要的数据从CPU传输到GPU
