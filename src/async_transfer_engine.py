@@ -1,5 +1,4 @@
 import threading
-import time
 import torch
 from typing import Callable, List, Optional, Tuple
 from block_manager import Block, BlockManager
@@ -29,21 +28,29 @@ class AsyncTransferEngine:
         self._shutdown = False
         self._monitor_shutdown = False
 
+        self.transfer_stream = torch.cuda.Stream()
+
         self.transfer_thread = threading.Thread(target=self._run, name=f"{name}_thread")
         self.monitor_thread = threading.Thread(
             target=self._event_monitor_worker, name=f"{name}_monitor_thread"
         )
+
+    def start(self):
+        """Start the transfer and monitor threads."""
         self.transfer_thread.start()
         self.monitor_thread.start()
 
     def shutdown(self):
         with self._condition:
             self._shutdown = True
-            self._monitor_shutdown = True
             self._condition.notify()
-        self.transfer_thread.join()
-        self.monitor_thread.join()
-        print(f"🔚 {self.name} shutdown complete.")
+        self._monitor_shutdown = True
+
+        if hasattr(self, "monitor_thread") and self.monitor_thread:
+            self.monitor_thread.join()
+        if hasattr(self, "transfer_thread") and self.transfer_thread:
+            self.transfer_thread.join()
+        print(f"🔚 {getattr(self, 'name', 'AsyncTransferEngine')} shutdown complete.")
 
     def update_transfer_unit(self, num_blocks: int, current_step: int) -> int:
         if is_pin_memory_available():
@@ -54,6 +61,11 @@ class AsyncTransferEngine:
             self.transfer_unit = max(1, self.transfer_unit // 2)
         self.transfer_unit = min(self.transfer_unit, num_blocks - current_step)
         return self.transfer_unit
+
+    def notify(self, layer: int):
+        raise NotImplementedError(
+            "Subclasses must implement the notify method to handle layer notifications."
+        )
 
     # 自定义的判断条件
     def _should_wait(self) -> bool:
@@ -74,7 +86,7 @@ class AsyncTransferEngine:
                     break
                 task = self._get_task()
 
-            if task:
+            if task is not None:
                 self._transfer(task)
 
     def _event_monitor_worker(self):
@@ -90,11 +102,13 @@ class AsyncTransferEngine:
         )
 
         def on_transfer_complete():
+            # TODO 该函数尚未完成，还不能使用transfer unit函数
             self.block_manager.update_blocks_after_transfer()
 
         self.cache_engine.transfer_blocks_async(
             blocks_to_transfer,
             self.src_device,
             self.dst_device,
+            self.transfer_stream,  # type: ignore
             callback_fn=on_transfer_complete,
         )

@@ -1,16 +1,14 @@
 import queue
-import threading
 import torch
 import time
 from collections import deque
-from queue import Queue
 from block_manager import BlockManager, Block
 from cache_engine import CacheEngine
-from typing import List, Optional, Set, Callable, Tuple
-from utils import is_pin_memory_available
+from async_transfer_engine import AsyncTransferEngine
+from typing import List, Set, Callable, Tuple
 
 
-class AsyncPrefetcher:
+class AsyncPrefetcher(AsyncTransferEngine):
     def __init__(
         self, block_manager: BlockManager, cache_engine: CacheEngine, transfer_unit: int
     ):
@@ -20,31 +18,21 @@ class AsyncPrefetcher:
             cache_engine: 缓存引擎
             transfer_unit: 传输单位
         """
-        # 通用的上级模块
-        self.block_manager = block_manager
-        self.cache_engine = cache_engine
-        self.transfer_unit = transfer_unit
+        super().__init__(
+            block_manager,
+            cache_engine,
+            transfer_unit,
+            src_device=torch.device("cpu"),
+            dst_device=torch.device("cuda"),
+            name="AsyncPrefetcher",
+        )
 
         # 特有的变量
         self.watermark = self.block_manager.watermark
         self.prefetch_queue: deque[int] = deque()
         self._prefetched_layers: Set[int] = set()
 
-        # 线程管理的变量
-        self._condition = threading.Condition()
-        self._shutdown = False
-        self._monitor_shutdown = False
-
-        # 线程创建和启动
-        self.prefetch_thread: Optional[threading.Thread] = threading.Thread(
-            target=self._run, name="prefetch_thread"
-        )
-        self.prefetch_thread.start()
-        self.event_monitor_thread: Optional[threading.Thread] = threading.Thread(
-            target=self._event_monitor_worker,
-            name="prefetch_event_monitor_thread",
-        )
-        self.event_monitor_thread.start()
+        self.start()
 
         # 当engine中的generate中计算完一个层后，需要把该层的层号发给prefetcher
         # prefetcher需要从该层的下一层开始，检查该层以后最近的层中的在CPU中的块
@@ -73,43 +61,16 @@ class AsyncPrefetcher:
                 self._prefetched_layers.add(future_layer)
             self._condition.notify()
 
-    def shutdown(self):
-        with self._condition:
-            self._shutdown = True
-            self._condition.notify()
-        self._monitor_shutdown = True
-        if self.event_monitor_thread:
-            self.event_monitor_thread.join()
-        if self.prefetch_thread:
-            self.prefetch_thread.join()
-        print("🟢 AsyncPrefetcher shutdown complete.")
+    def _should_wait(self) -> bool:
+        return not self.prefetch_queue and not self._shutdown
 
-    def update_transfer_unit(self, num_blocks: int, current_step: int) -> int:
-        """根据传输带宽利用率，更新传输单位，如果PCIe带宽利用率低，则增加传输单位，否则减小传输单位"""
-        # FIXME: 需要根据传输带宽利用率来更新传输单位
-        if is_pin_memory_available():
-            self.transfer_unit = min(
-                self.block_manager.num_gpu_blocks, self.transfer_unit * 2
-            )
-        else:
-            self.transfer_unit = max(1, self.transfer_unit // 2)
-        self.transfer_unit = min(self.transfer_unit, num_blocks - current_step)
-        return self.transfer_unit
+    def _get_task(self):
+        layer = self.prefetch_queue.popleft()
+        self._prefetched_layers.remove(layer)
+        return layer
 
-    def _run(self):
-        while True:
-            with self._condition:
-                while not self.prefetch_queue and not self._shutdown:
-                    self._condition.wait()
-                if self._shutdown:
-                    break
-                layer = self.prefetch_queue.popleft()
-                self._prefetched_layers.remove(layer)
-            print(f"🟢 Layer {layer} prefetch started.")
-            if layer is not None:
-                self.prefetcher_layer(layer)
-
-    def prefetcher_layer(self, layer: int):
+    def _transfer(self, task):
+        layer = task
         sorted_blocks = self.block_manager.predict_next_layer_needed_blocks(layer)
         num_blocks = len(sorted_blocks)
         current_step = 0
@@ -148,9 +109,16 @@ class AsyncPrefetcher:
         def on_transfer_complete():
             self.block_manager.update_block_device_prefetch(plan, blocks)
 
-        self.cache_engine.prefetch_copy_blocks_async(
+        # self.cache_engine.prefetch_copy_blocks_async(
+        #     blocks_to_prefetch,
+        #     blocks,
+        #     callback_fn=on_transfer_complete,
+        # )
+        self.cache_engine.transfer_blocks_async(
             blocks_to_prefetch,
-            blocks,
+            self.src_device,
+            self.dst_device,
+            self.transfer_stream,  # type: ignore
             callback_fn=on_transfer_complete,
         )
 

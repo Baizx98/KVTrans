@@ -1,40 +1,31 @@
+import queue
 import threading
 import torch
 import time
 from block_manager import BlockManager, Block
 from cache_engine import CacheEngine
-from typing import List, Optional
-from utils import is_pin_memory_available
+from async_transfer_engine import AsyncTransferEngine
+from typing import List, Optional, Callable, Tuple
 
 
-class AsyncOffloader:
+class AsyncOffloader(AsyncTransferEngine):
     def __init__(
         self, block_manager: BlockManager, cache_engine: CacheEngine, transfer_unit: int
     ):
-        # 通用的上级模块
-        self.block_manager = block_manager
-        self.cache_engine = cache_engine
-        self.transfer_unit: int = transfer_unit
+        super().__init__(
+            block_manager,
+            cache_engine,
+            transfer_unit,
+            src_device=torch.device("cuda"),
+            dst_device=torch.device("cpu"),
+            name="AsyncOffloader",
+        )
 
         # 特有的变量
         self._request_layer: Optional[int] = None
         self._abort_event = threading.Event()
 
-        # 线程管理的变量
-        self._condition = threading.Condition()
-        self._shutdown = False
-        self._monitor_shutdown = False
-
-        # 线程创建和启动
-        self.offload_thread: threading.Thread = threading.Thread(
-            target=self._run, name="offload_thread"
-        )
-        self.offload_thread.start()
-        self.event_monitor_thread = threading.Thread(
-            target=self._event_monitor_worker,
-            name="offload_event_monitor_thread",
-        )
-        self.event_monitor_thread.start()
+        self.start()
 
     def notify(self, layer: int):
         # notify the offload thread to offload the layer
@@ -46,30 +37,29 @@ class AsyncOffloader:
     def shutdown(self):
         with self._condition:
             self._shutdown = True
-            self._monitor_shutdown = True
-            self._abort_event.set()
             self._condition.notify()
-        self.offload_thread.join()
-        self.event_monitor_thread.join()
+        self._monitor_shutdown = True
 
-    def _run(self):
-        # offload worker loop
-        while True:
-            with self._condition:
-                while self._request_layer is None and not self._shutdown:
-                    self._condition.wait()
+        self._abort_event.set()  # ✅ 中止当前 transfer 操作
 
-                if self._shutdown:
-                    print("🔚 Offloader shutting down.")
-                    break
+        if self.monitor_thread:
+            self.monitor_thread.join()
+        if self.transfer_thread:
+            self.transfer_thread.join()
+        print(f"🔚 {self.name} shutdown complete.")
 
-                layer = self._request_layer
-                self._request_layer = None
-                self._abort_event.clear()
-            if layer is not None:
-                self._offload_layer(layer)
+    def _should_wait(self) -> bool:
+        # Custom condition to wait for offload requests
+        return self._request_layer is None and not self._shutdown
 
-    def _offload_layer(self, layer: int):
+    def _get_task(self):
+        layer = self._request_layer
+        self._request_layer = None
+        self._abort_event.clear()
+        return layer
+
+    def _transfer(self, task):
+        layer = task
         sorted_blocks = self.block_manager.get_layer_blocks_by_importance(layer)
         num_blocks = len(sorted_blocks)
         current_step = 0
@@ -77,7 +67,7 @@ class AsyncOffloader:
         print(f"⬇️ Start offloading layer {layer} with {num_blocks} blocks...")
 
         while current_step < num_blocks:
-            if self._abort_event.is_set():
+            if self._abort_event.is_set() or self._shutdown:
                 print(f"🟡 Layer {layer} offload interrupted at step {current_step}.")
                 return
 
@@ -92,17 +82,6 @@ class AsyncOffloader:
 
         print(f"✅ Offload complete for layer {layer}.")
 
-    def update_transfer_unit(self, num_blocks: int, current_step: int) -> int:
-        # 如果每次传输的处理开销太大，则增加传输单位，否则减小传输单位
-        if is_pin_memory_available():
-            self.transfer_unit = min(
-                self.block_manager.num_gpu_blocks, self.transfer_unit * 2
-            )
-        else:
-            self.transfer_unit = max(1, self.transfer_unit // 2)
-        self.transfer_unit = min(self.transfer_unit, num_blocks - current_step)
-        return self.transfer_unit
-
     def _offload_unit(self, plan: List[tuple[int, int]], blocks: List[Block]):
         blocks_to_offload = torch.tensor(plan, device="cpu", dtype=torch.int64).view(
             -1, 2
@@ -112,32 +91,50 @@ class AsyncOffloader:
         def on_transfer_complete():
             self.block_manager.update_block_device_offload(plan, blocks)
 
-        self.cache_engine.offload_copy_blocks_async(
+        # self.cache_engine.offload_copy_blocks_async(
+        #     blocks_to_offload,
+        #     blocks,
+        #     callback_fn=on_transfer_complete,
+        # )
+        self.cache_engine.transfer_blocks_async(
             blocks_to_offload,
-            blocks,
+            self.src_device,
+            self.dst_device,
+            self.transfer_stream,  # type: ignore
             callback_fn=on_transfer_complete,
         )
 
     def _event_monitor_worker(self):
-        """
-        这个线程专门负责检查 CUDA 事件是否完成，并在完成后执行回调。
-        """
-        print("💡 Offload Event monitor thread started.")
-        while not self._monitor_shutdown:
-            events_to_process = []
-            with self.cache_engine.offload_callbacks_lock:
-                # 遍历所有待处理的事件
-                for event, callback_fn in list(
-                    self.cache_engine.offload_completion_callbacks.items()
-                ):
-                    if event.query():  # 检查事件是否完成
-                        events_to_process.append((event, callback_fn))
+        """这个线程专门负责检查CUDA事件是否完成，并在完成后执行回调（Offloader 专用）"""
+        print("💡 Offload event monitor thread started.")
+        pending_events: List[Tuple[torch.cuda.Event, Callable]] = []
+        BATCH_SIZE = 16
+        WAIT_TIME = 0.001
 
-            for event, callback_fn in events_to_process:
-                # 移除已完成的事件 这里是什么意思呢？NOTE
-                with self.cache_engine.offload_callbacks_lock:
-                    del self.cache_engine.offload_completion_callbacks[event]
-                # 执行回调函数
+        while not self._monitor_shutdown:
+            try:
+                # 从队列中取任务，凑满一个 batch
+                for _ in range(BATCH_SIZE - len(pending_events)):
+                    event, callback_fn = (
+                        self.cache_engine.offload_monitor_queue.get_nowait()
+                    )
+                    pending_events.append((event, callback_fn))
+            except queue.Empty:
+                pass
+
+            if not pending_events:
+                time.sleep(WAIT_TIME)
+                continue
+
+            # 检查哪些事件已经完成
+            ready_indices = []
+            for i, (event, _) in enumerate(pending_events):
+                if event.query():
+                    ready_indices.append(i)
+
+            # 执行回调并移除完成的事件
+            for idx in reversed(ready_indices):  # 倒序 pop 防止索引错乱
+                _, callback_fn = pending_events.pop(idx)
                 callback_fn()
 
-            time.sleep(0.001)  # 短暂休眠，避免忙等待消耗过多 CPU
+            time.sleep(WAIT_TIME)
