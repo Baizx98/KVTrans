@@ -13,9 +13,25 @@ BlockId = int
 SeqId = int
 
 
+# Block's state
+class BlockState:
+    # 一共有ready和transferring两种状态
+    READY = 1
+    TRANSFERRING = 0
+
+
 class Block:
     def __init__(self, block_id: BlockId):
         self.block_id = block_id
+        self.state = BlockState.TRANSFERRING  # 初始状态为 TRANSFERRING
+
+    def ready(self):
+        """将块状态设置为 READY"""
+        self.state = BlockState.READY
+
+    def transferring(self):
+        """将块状态设置为 TRANSFERRING"""
+        self.state = BlockState.TRANSFERRING
 
 
 class BlockTable:
@@ -69,6 +85,20 @@ class BlockManager:
         if value < 0:
             raise ValueError("Buffer blocks cannot be negative")
         self._buffer_blocks = value
+
+    def can_allocate_blocks(self, device: torch.device, n: int) -> bool:
+        if device.type == "cuda":
+            return self.can_allocate_gpu_blocks(n)
+        elif device.type == "cpu":
+            return self.can_allocate_cpu_blocks(n)
+        raise ValueError(f"Invalid device type: {device.type}")
+
+    def allocate_block(self, device: torch.device) -> Block:
+        if device.type == "cuda":
+            return self.allocate_gpu_block()
+        elif device.type == "cpu":
+            return self.allocate_cpu_block()
+        raise ValueError(f"Invalid device type: {device.type}")
 
     def can_allocate_gpu_blocks(self, n: int) -> bool:
         # TODO watermark and buffer
@@ -138,6 +168,7 @@ class BlockManager:
             return self.num_gpu_blocks + pid
         raise ValueError(f"Invalid device: {device}")
 
+    # 稀疏、卸载相关的函数不应该放在block manager里，应该需要一个单独的类来处理
     def is_kv_cache_ready(self, batch: List[Sequence], layer: int) -> bool:
         """检查该batch的该层的所需最少kv块是否都在GPU上"""
         for seq in batch:
@@ -213,6 +244,25 @@ class BlockManager:
     def get_transfer_plan(
         self, blocks: List[Block], src_device: torch.device, dst_device: torch.device
     ) -> List[Tuple[int, int]]:
+        """
+        1. 将源块标记为 TRANSFERRING 状态
+        2. 分配目标块并将其标记为 TRANSFERRING 状态
+        3. 返回块的物理 ID 映射
+        """
+        physical_block_id_mapping: List[Tuple[int, int]] = []
+        block_num = len(blocks)
+        if self.can_allocate_blocks(dst_device, block_num):
+            for block in blocks:
+                src_block_id = block.block_id
+                _, src_pid = self.get_device_and_pid(src_block_id)
+                dst_block_id = self.allocate_block(dst_device).block_id
+                _, dst_pid = self.get_device_and_pid(dst_block_id)
+                physical_block_id_mapping.append((src_pid, dst_pid))
+        else:
+            raise RuntimeError(
+                f"Not enough blocks available for transfer from {src_device} to {dst_device}"
+            )
+
         raise NotImplementedError(
             "This method should be implemented in subclasses to provide specific transfer plans."
         )

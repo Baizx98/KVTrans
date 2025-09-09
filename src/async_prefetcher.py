@@ -109,53 +109,11 @@ class AsyncPrefetcher(AsyncTransferEngine):
         def on_transfer_complete():
             self.block_manager.update_block_device_prefetch(plan, blocks)
 
-        # self.cache_engine.prefetch_copy_blocks_async(
-        #     blocks_to_prefetch,
-        #     blocks,
-        #     callback_fn=on_transfer_complete,
-        # )
         self.cache_engine.transfer_blocks_async(
             blocks_to_prefetch,
             self.src_device,
             self.dst_device,
             self.transfer_stream,  # type: ignore
             callback_fn=on_transfer_complete,
+            add_event=self.event_monitor.add_event,
         )
-
-    def _event_monitor_worker(self):
-        """这个线程专门负责检查CUDA事件是否完成，并在完成后执行回调"""
-        # TODO 添加定时回调处理或批量回调处理机制，减少调度和轮询开销
-        print("💡 Prefetch event monitor thread started.")
-        pending_events: List[Tuple[torch.cuda.Event, Callable]] = []
-        BATCH_SIZE = 16
-        WAIT_TIME = 0.001
-        while not self._monitor_shutdown:
-            # print("🟢 prefetch callback running")
-            # TODO 检查是否有任务需要中止
-            try:
-                for _ in range(BATCH_SIZE - len(pending_events)):
-                    event, callback_fn = (
-                        self.cache_engine.prefetch_monitor_queue.get_nowait()
-                    )
-                    pending_events.append((event, callback_fn))
-            except queue.Empty:
-                pass
-
-            if not pending_events:
-                time.sleep(WAIT_TIME)
-                continue
-
-            for event, callback_fn in pending_events:
-                while not event.query():
-                    time.sleep(WAIT_TIME)
-
-            ready_indices = []
-            for i, (event, _) in enumerate(pending_events):
-                if event.query():
-                    ready_indices.append(i)
-
-            for idx in reversed(ready_indices):
-                _, callback_fn = pending_events.pop(idx)
-                callback_fn()
-
-            time.sleep(WAIT_TIME)

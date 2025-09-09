@@ -18,21 +18,22 @@ class EventMonitor:
             cls._ref_count += 1
             return cls._instance
 
-    def _init(self):
+    def _init(self) -> None:
         self._monitor_shutdown = False
-        self._queues: List[queue.Queue] = []
         self._pending_events: List[Tuple[torch.cuda.Event, Callable]] = []
+        self._pending_lock = threading.Lock()
         self._thread = threading.Thread(target=self._monitor_loop, daemon=True)
         self._thread.start()
         print("✅ EventMonitor started.")
 
-    def register_queue(self, q: queue.Queue):
-        self._queues.append(q)
+    def add_event(self, event: torch.cuda.Event, callback_fn: Callable):
+        with self._pending_lock:
+            self._pending_events.append((event, callback_fn))
 
     def unregister(self):
         with self._lock:
             self._ref_count -= 1
-            if self._ref_count == 0:
+            if self._ref_count <= 0:
                 self.shutdown()
 
     def shutdown(self):
@@ -47,21 +48,18 @@ class EventMonitor:
         WAIT_TIME = 0.001
 
         while not self._monitor_shutdown:
-            for q in self._queues:
-                try:
-                    for _ in range(BATCH_SIZE):
-                        event, callback_fn = q.get_nowait()
-                        self._pending_events.append((event, callback_fn))
-                except queue.Empty:
-                    continue
+            ready_callbacks = []
+            with self._pending_lock:
+                ready_indices = [
+                    i
+                    for i, (event, _) in enumerate(self._pending_events)
+                    if event.query()
+                ]
+                for idx in reversed(ready_indices):
+                    _, callback = self._pending_events.pop(idx)
+                    ready_callbacks.append(callback)
 
-            # 过滤已完成事件
-            ready_indices = [
-                i for i, (event, _) in enumerate(self._pending_events) if event.query()
-            ]
-
-            for idx in reversed(ready_indices):
-                _, callback = self._pending_events.pop(idx)
+            for callback in ready_callbacks:
                 callback()
 
             time.sleep(WAIT_TIME)

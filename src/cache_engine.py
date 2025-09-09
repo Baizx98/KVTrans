@@ -101,7 +101,8 @@ class CacheEngine:
         src_device: torch.device,
         dst_device: torch.device,
         transfer_stream: torch.cuda.Stream,
-        callback_fn=None,
+        callback_fn: Callable,
+        add_event: Callable,
     ):
         """Transfer blocks asynchronously between devices."""
         # TODO: 现在是临时过渡版本，后续根据src和dst设备添加更优雅的处理逻辑
@@ -110,16 +111,11 @@ class CacheEngine:
 
         src_cache = self.gpu_cache if src_device.type == "cuda" else self.cpu_cache
         dst_cache = self.cpu_cache if dst_device.type == "cpu" else self.gpu_cache
-        monitor_queue = (
-            self.offload_monitor_queue
-            if src_device.type == "cuda"
-            else self.prefetch_monitor_queue
-        )
 
         with torch.cuda.stream(stream=transfer_stream):  # type: ignore
             tmp_tensor = src_cache[:, src_block_ids, :].contiguous()
             dst_cache[:, dst_block_ids, :].copy_(tmp_tensor, non_blocking=True)
             event: torch.cuda.Event = torch.cuda.Event(blocking=False)  # type: ignore
             event.record(transfer_stream)
-            if callback_fn:
-                monitor_queue.put((event, callback_fn))
+            if callback_fn is not None:
+                add_event(event, callback_fn)

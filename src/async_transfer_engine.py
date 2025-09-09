@@ -1,8 +1,10 @@
+import queue
 import threading
 import torch
-from typing import Callable, List, Optional, Tuple
+from typing import List
 from block_manager import Block, BlockManager
 from cache_engine import CacheEngine
+from event_monitor import EventMonitor
 from utils import is_pin_memory_available
 
 
@@ -26,30 +28,25 @@ class AsyncTransferEngine:
 
         self._condition = threading.Condition()
         self._shutdown = False
-        self._monitor_shutdown = False
+
+        self.event_monitor = EventMonitor()
+        # TODO monitor queue 的使用方法应该重新考虑，到底是用注册还是函数传递呢
 
         self.transfer_stream = torch.cuda.Stream()
 
         self.transfer_thread = threading.Thread(target=self._run, name=f"{name}_thread")
-        self.monitor_thread = threading.Thread(
-            target=self._event_monitor_worker, name=f"{name}_monitor_thread"
-        )
 
     def start(self):
         """Start the transfer and monitor threads."""
         self.transfer_thread.start()
-        self.monitor_thread.start()
 
     def shutdown(self):
         with self._condition:
             self._shutdown = True
             self._condition.notify()
-        self._monitor_shutdown = True
-
-        if hasattr(self, "monitor_thread") and self.monitor_thread:
-            self.monitor_thread.join()
         if hasattr(self, "transfer_thread") and self.transfer_thread:
             self.transfer_thread.join()
+        self.event_monitor.unregister()
         print(f"🔚 {getattr(self, 'name', 'AsyncTransferEngine')} shutdown complete.")
 
     def update_transfer_unit(self, num_blocks: int, current_step: int) -> int:
@@ -89,9 +86,6 @@ class AsyncTransferEngine:
             if task is not None:
                 self._transfer(task)
 
-    def _event_monitor_worker(self):
-        raise NotImplementedError
-
     def _transfer_unit(self, plan: List[Block], blocks: List[Block]):
         """
         Transfer a unit of blocks according to the offload plan.
@@ -111,4 +105,5 @@ class AsyncTransferEngine:
             self.dst_device,
             self.transfer_stream,  # type: ignore
             callback_fn=on_transfer_complete,
+            add_event=self.event_monitor.add_event,
         )
