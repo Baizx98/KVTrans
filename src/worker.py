@@ -18,5 +18,5 @@ class Worker:
 
     def execute_model(self, input_data=None):
         print("Executing model with input")
-        sleep(0.005)  # Simulate model execution time
+        sleep(0.01)  # Simulate model execution time
         print("Model execution completed.")

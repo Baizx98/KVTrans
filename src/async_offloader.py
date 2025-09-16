@@ -29,6 +29,7 @@ class AsyncOffloader(AsyncTransferEngine):
 
     def notify(self, layer: int):
         # notify the offload thread to offload the layer
+        print(f"offloader notify layer:{layer}")
         self._abort_event.set()
         with self._condition:
             self._request_layer = layer
@@ -73,7 +74,10 @@ class AsyncOffloader(AsyncTransferEngine):
             if not blocks:
                 break
 
-            plan = self.block_manager.get_offload_plan(blocks)
+            # plan = self.block_manager.get_offload_plan(blocks)
+            plan = self.block_manager.get_transfer_plan(
+                blocks, self.src_device, self.dst_device
+            )
             print(f"🧠 Offload plan for layer {layer} at step {current_step}: {plan}")
             self._offload_unit(plan, blocks)
             current_step += self.transfer_unit
@@ -86,7 +90,9 @@ class AsyncOffloader(AsyncTransferEngine):
         )
 
         def on_transfer_complete():
-            self.block_manager.update_block_device_offload(plan, blocks)
+            self.block_manager.update_blocks_after_transfer(
+                plan, blocks, self.src_device, self.dst_device
+            )
 
         self.cache_engine.transfer_blocks_async(
             blocks_to_offload,

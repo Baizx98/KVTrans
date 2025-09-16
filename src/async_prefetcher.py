@@ -1,11 +1,9 @@
-import queue
 import torch
-import time
 from collections import deque
 from block_manager import BlockManager, Block
 from cache_engine import CacheEngine
 from async_transfer_engine import AsyncTransferEngine
-from typing import List, Set, Callable, Tuple
+from typing import List, Set
 
 
 class AsyncPrefetcher(AsyncTransferEngine):
@@ -44,6 +42,7 @@ class AsyncPrefetcher(AsyncTransferEngine):
         可根据系统负载动态调整预取层数。
         当前实现为静态：预取 current_layer + 1 和 +2。
         """
+        # FIXME 这里的逻辑需要重新设计，层预取应该形成流水线，第二次迭代之前就应该预取第零层了
         # TODO 这里需要根据watermark来决定预取的层数
         # TODO 这里预取的层数是循环的，预取完最后一层后就应该预取第一层了
         return [
@@ -54,6 +53,7 @@ class AsyncPrefetcher(AsyncTransferEngine):
         ]
 
     def notify(self, layer: int):
+        print(f"prefetcher notify layer:{layer}")
         with self._condition:
             # TODO 这里需要根据watermark来决定预取的层数
             for future_layer in self._get_prefetch_layers(layer):
@@ -75,6 +75,8 @@ class AsyncPrefetcher(AsyncTransferEngine):
         num_blocks = len(sorted_blocks)
         current_step = 0
 
+        print(f"⬇️ Start prefetching layer {layer} with {num_blocks} blocks...")
+
         if num_blocks == 0:
             return
 
@@ -89,7 +91,10 @@ class AsyncPrefetcher(AsyncTransferEngine):
             if not blocks:
                 break
             try:
-                plan = self.block_manager.get_prefetch_plan(blocks)
+                # plan = self.block_manager.get_prefetch_plan(blocks)
+                plan = self.block_manager.get_transfer_plan(
+                    blocks, self.src_device, self.dst_device
+                )
                 print(f"prefetch plan for layer {layer} at step {current_step}: {plan}")
             except RuntimeError as e:
                 print(f"🟥 Layer {layer} prefetch failed: {e}")
@@ -107,7 +112,9 @@ class AsyncPrefetcher(AsyncTransferEngine):
         )
 
         def on_transfer_complete():
-            self.block_manager.update_block_device_prefetch(plan, blocks)
+            self.block_manager.update_blocks_after_transfer(
+                plan, blocks, self.src_device, self.dst_device
+            )
 
         self.cache_engine.transfer_blocks_async(
             blocks_to_prefetch,

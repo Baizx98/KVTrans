@@ -86,7 +86,7 @@ class AsyncTransferEngine:
             if task is not None:
                 self._transfer(task)
 
-    def _transfer_unit(self, plan: List[Block], blocks: List[Block]):
+    def _transfer_unit(self, plan: List[tuple[int, int]], blocks: List[Block]):
         """
         Transfer a unit of blocks according to the offload plan.
         This method should be implemented in subclasses.
@@ -97,7 +97,9 @@ class AsyncTransferEngine:
 
         def on_transfer_complete():
             # TODO 该函数尚未完成，还不能使用transfer unit函数
-            self.block_manager.update_blocks_after_transfer()
+            self.block_manager.update_blocks_after_transfer(
+                plan, blocks, self.src_device, self.dst_device
+            )
 
         self.cache_engine.transfer_blocks_async(
             blocks_to_transfer,
